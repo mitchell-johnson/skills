@@ -25,6 +25,10 @@ OpenTelemetry (OTel) provides vendor-neutral instrumentation for distributed tra
 - Log-only observability (OTel JS logs API is still experimental)
 - You just need simple `console.log` debugging
 
+**Supporting files:**
+- `react-patterns.md` — Extended React patterns: TracingProvider, route tracing with render duration, user journey tracking, Web Vitals, Redux middleware, custom frontend sampler, bundle size estimates
+- `collector-reference.md` — Collector configs, backend comparison, Cloudflare native Destinations, Docker Compose, NGINX reverse proxy, deployment patterns
+
 ## Quick Reference: Which Packages for Which Runtime
 
 | Runtime | Trace Provider | Span Processor | Exporter | Context Manager |
@@ -205,6 +209,24 @@ OTEL_EXPORTER_OTLP_ENDPOINT = "https://your-collector:4318/v1/traces"
 # wrangler secret put OTEL_API_KEY
 ```
 
+### Alternative: Cloudflare Native OTel Destinations (Beta)
+
+Cloudflare offers built-in OTel export without custom SDK code. Configure in `wrangler.jsonc`:
+
+```jsonc
+{
+  "observability": {
+    "traces": {
+      "enabled": true,
+      "destinations": ["my-trace-destination"],
+      "head_sampling_rate": 0.05
+    }
+  }
+}
+```
+
+Configure destination endpoints and auth in the Cloudflare dashboard. See `collector-reference.md` for details.
+
 ### Sampling for High-Traffic Workers
 
 ```js
@@ -299,6 +321,8 @@ registerInstrumentations({
 
 **Import this file at the top of your React app entry point (before React renders).**
 
+> **Note:** Browser OTel instrumentation is experimental. The `propagateTraceHeaderCorsUrls` option on `FetchInstrumentation` is critical — without it, `traceparent` headers won't be injected on cross-origin API requests, breaking distributed tracing.
+
 ### CORS: Critical for Browser Export
 
 Your OTel collector MUST allow browser origins. Without CORS headers, the browser will silently drop telemetry exports.
@@ -323,6 +347,8 @@ receivers:
 ```
 
 ### React-Specific Patterns
+
+See `react-patterns.md` for extended patterns: TracingProvider context, component lifecycle tracing, user journey tracking, Web Vitals integration, Redux/Zustand middleware, custom frontend sampler, and bundle size estimates.
 
 **Custom hook for manual spans:**
 
@@ -471,6 +497,13 @@ propagation.inject(context.active(), headers);
 const parentCtx = propagation.extract(context.active(), incomingHeaders);
 ```
 
+### `startActiveSpan` vs `startSpan`
+
+- **`startActiveSpan(name, callback)`** — Creates span AND sets it as active context. Child spans created inside the callback are automatically nested. **Preferred in most cases.**
+- **`startSpan(name)`** — Creates span WITHOUT setting it on context. Use for independent/sibling spans or when you need manual context control.
+
+**Important for `sdk-trace-base` (Workers):** `startActiveSpan` does NOT set the span as active context without a context manager. You must manually manage context with `context.with(trace.setSpan(...))`.
+
 ### Semantic Conventions
 
 Always use the constants from `@opentelemetry/semantic-conventions`:
@@ -511,6 +544,8 @@ const resource = new Resource({
 | `AlwaysOffSampler` | Disable tracing entirely |
 
 ## Collector & Backend Setup
+
+See `collector-reference.md` for complete configs, Docker Compose, NGINX proxy, and backend comparison.
 
 ### Direct Export (No Collector)
 
