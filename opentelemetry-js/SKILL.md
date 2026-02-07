@@ -1,15 +1,17 @@
 ---
 name: opentelemetry-js
-description: Use when adding OpenTelemetry tracing, metrics, or observability to JavaScript/TypeScript applications - covers Cloudflare Workers (V8 isolates), React browser apps, and Node.js with OTLP export, context propagation, and collector configuration
+description: Use when adding OpenTelemetry tracing, metrics, or observability to TypeScript applications - covers Cloudflare Workers (V8 isolates), React browser apps, and Node.js with OTLP export, context propagation, and collector configuration
 ---
 
-# OpenTelemetry for JavaScript
+# OpenTelemetry for TypeScript
 
 ## Overview
 
 OpenTelemetry (OTel) provides vendor-neutral instrumentation for distributed tracing, metrics, and logs. The JS ecosystem has three distinct runtime targets - each with different SDK packages, constraints, and export strategies. This skill covers all three: **Cloudflare Workers**, **React/Browser**, and **Node.js**.
 
 **Core principle:** Choose the right SDK package for your runtime. The wrong package will fail at deploy time or produce no telemetry silently.
+
+**SDK version:** This skill targets OpenTelemetry JS SDK **2.x** (released 2025). Key 2.x changes: `new Resource()` replaced by `resourceFromAttributes()`, `addSpanProcessor()` removed (pass `spanProcessors` array to constructor), `BasicTracerProvider.register()` removed (use `WebTracerProvider.register()` for browser or set global provider manually).
 
 ## When to Use
 
@@ -61,17 +63,25 @@ npm install @opentelemetry/api \
   @opentelemetry/exporter-trace-otlp-http
 ```
 
-### Trace Provider (tracing.js)
+### Trace Provider (tracing.ts)
 
-```js
-import { trace, context, SpanStatusCode } from '@opentelemetry/api';
+```ts
+import { trace, type Tracer } from '@opentelemetry/api';
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { Resource } from '@opentelemetry/resources';
+import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 
-export function createTracerProvider(env) {
-  const resource = new Resource({
+interface Env {
+  OTEL_EXPORTER_OTLP_ENDPOINT?: string;
+  OTEL_API_KEY?: string;
+}
+
+export function createTracerProvider(env: Env): {
+  provider: BasicTracerProvider;
+  tracer: Tracer;
+} {
+  const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: 'my-worker',
     [ATTR_SERVICE_VERSION]: '1.0.0',
     'cloud.provider': 'cloudflare',
@@ -90,32 +100,41 @@ export function createTracerProvider(env) {
     spanProcessors: [new SimpleSpanProcessor(exporter)],
   });
 
-  provider.register();
-  return provider;
+  // In SDK 2.x, BasicTracerProvider no longer has register().
+  // Get the tracer directly from the provider instance.
+  const tracer = provider.getTracer('my-worker', '1.0.0');
+
+  return { provider, tracer };
 }
 ```
 
 **Why SimpleSpanProcessor:** Workers requests are short-lived. Simple processor exports each span immediately when it ends. BatchSpanProcessor may lose spans if the isolate terminates before the batch interval fires.
 
-### Request Handler (index.js)
+### Request Handler (index.ts)
 
-```js
-import { trace, context, SpanStatusCode, propagation } from '@opentelemetry/api';
-import { createTracerProvider } from './tracing.js';
+```ts
+import { trace, context, SpanStatusCode, propagation, type TextMapGetter } from '@opentelemetry/api';
+import { createTracerProvider } from './tracing';
+
+interface Env {
+  OTEL_EXPORTER_OTLP_ENDPOINT?: string;
+  OTEL_API_KEY?: string;
+}
+
+const headerGetter: TextMapGetter<Record<string, string>> = {
+  get(carrier, key) { return carrier[key]; },
+  keys(carrier) { return Object.keys(carrier); },
+};
 
 export default {
-  async fetch(request, env, ctx) {
-    const provider = createTracerProvider(env);
-    const tracer = trace.getTracer('my-worker', '1.0.0');
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const { provider, tracer } = createTracerProvider(env);
 
     // Extract incoming trace context for distributed tracing
     const parentContext = propagation.extract(
       context.active(),
       Object.fromEntries(request.headers),
-      {
-        get(carrier, key) { return carrier[key]; },
-        keys(carrier) { return Object.keys(carrier); },
-      }
+      headerGetter,
     );
 
     const span = tracer.startSpan('worker.request', {
@@ -123,23 +142,23 @@ export default {
         'http.method': request.method,
         'http.url': request.url,
         'http.target': new URL(request.url).pathname,
-        'cf.colo': request.cf?.colo || 'unknown',
+        'cf.colo': (request as any).cf?.colo || 'unknown',
       },
     }, parentContext);
 
-    let response;
+    let response: Response;
     try {
       response = await context.with(
         trace.setSpan(parentContext, span),
-        () => handleRequest(request, env, tracer)
+        () => handleRequest(request, env, tracer),
       );
       span.setAttribute('http.status_code', response.status);
       if (response.status >= 400) {
         span.setStatus({ code: SpanStatusCode.ERROR });
       }
     } catch (error) {
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      span.recordException(error as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error).message });
       response = new Response('Internal Server Error', { status: 500 });
     } finally {
       span.end();
@@ -158,14 +177,17 @@ export default {
 
 Wrap outgoing `fetch` calls to create child spans and propagate context:
 
-```js
-import { trace, context, SpanStatusCode, propagation } from '@opentelemetry/api';
+```ts
+import { trace, context, SpanStatusCode, propagation, type Tracer } from '@opentelemetry/api';
 
-export async function tracedFetch(url, options = {}) {
+export async function tracedFetch(
+  url: string,
+  options: RequestInit = {},
+): Promise<Response> {
   const tracer = trace.getTracer('my-worker');
   const span = tracer.startSpan('fetch', {
     attributes: {
-      'http.method': options.method || 'GET',
+      'http.method': (options.method as string) || 'GET',
       'http.url': url,
     },
   });
@@ -184,8 +206,8 @@ export async function tracedFetch(url, options = {}) {
       }
       return response;
     } catch (error) {
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      span.recordException(error as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error).message });
       throw error;
     } finally {
       span.end();
@@ -199,7 +221,7 @@ export async function tracedFetch(url, options = {}) {
 ```toml
 # wrangler.toml
 name = "my-otel-worker"
-main = "src/index.js"
+main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
 [vars]
@@ -229,17 +251,19 @@ Configure destination endpoints and auth in the Cloudflare dashboard. See `colle
 
 ### Sampling for High-Traffic Workers
 
-```js
-import { TraceIdRatioBasedSampler } from '@opentelemetry/sdk-trace-base';
+```ts
+import { TraceIdRatioBasedSampler, BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { resourceFromAttributes } from '@opentelemetry/resources';
+import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 
 // Sample 10% of traces
 const sampler = new TraceIdRatioBasedSampler(0.1);
 
-// Pass to provider
 const provider = new BasicTracerProvider({
-  resource,
+  resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: 'my-worker' }),
   sampler,
-  spanProcessors: [new SimpleSpanProcessor(exporter)],
+  spanProcessors: [new SimpleSpanProcessor(new OTLPTraceExporter({ url: '...' }))],
 });
 ```
 
@@ -288,7 +312,7 @@ const resource = defaultResource().merge(
   resourceFromAttributes({
     [ATTR_SERVICE_NAME]: 'my-react-app',
     [ATTR_SERVICE_VERSION]: '1.0.0',
-  })
+  }),
 );
 
 const exporter = new OTLPTraceExporter({
@@ -301,6 +325,7 @@ const provider = new WebTracerProvider({
   spanProcessors: [new BatchSpanProcessor(exporter)],
 });
 
+// WebTracerProvider still has register() in SDK 2.x
 provider.register({
   contextManager: new ZoneContextManager(),
 });
@@ -359,7 +384,7 @@ export function useTracer(name: string) {
   const tracer = trace.getTracer(name);
 
   return {
-    traceAsync: async <T>(spanName: string, fn: () => Promise<T>): Promise<T> => {
+    traceAsync: async <T,>(spanName: string, fn: () => Promise<T>): Promise<T> => {
       return tracer.startActiveSpan(spanName, async (span) => {
         try {
           const result = await fn();
@@ -396,7 +421,7 @@ import { trace } from '@opentelemetry/api';
 import { useLocation } from 'react-router-dom';
 import { useEffect, useRef } from 'react';
 
-export function useRouteTracing() {
+export function useRouteTracing(): void {
   const location = useLocation();
   const tracer = trace.getTracer('react-router');
   const prevPath = useRef(location.pathname);
@@ -419,19 +444,25 @@ export function useRouteTracing() {
 **Error boundary integration:**
 
 ```tsx
+import React from 'react';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 
-class TracedErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  { hasError: boolean }
-> {
-  state = { hasError: false };
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
 
-  static getDerivedStateFromError() {
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+class TracedErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
     return { hasError: true };
   }
 
-  componentDidCatch(error: Error, info: React.ErrorInfo) {
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
     const tracer = trace.getTracer('error-boundary');
     const span = tracer.startSpan('react.error');
     span.recordException(error);
@@ -440,7 +471,7 @@ class TracedErrorBoundary extends React.Component<
     span.end();
   }
 
-  render() {
+  render(): React.ReactNode {
     if (this.state.hasError) return <div>Something went wrong.</div>;
     return this.props.children;
   }
@@ -459,15 +490,15 @@ Generate this dynamically on the server with the server request's trace ID and a
 
 ## Shared Patterns
 
-### JS API Quick Reference
+### API Quick Reference
 
-```js
+```ts
 import { trace, context, SpanStatusCode, propagation } from '@opentelemetry/api';
 
 // Get a tracer
 const tracer = trace.getTracer('scope-name', '1.0.0');
 
-// Create spans
+// Create spans — startActiveSpan sets span as active context (preferred)
 tracer.startActiveSpan('operation', (span) => {
   span.setAttribute('key', 'value');
   span.addEvent('something.happened', { detail: 'value' });
@@ -475,7 +506,7 @@ tracer.startActiveSpan('operation', (span) => {
   span.end();
 });
 
-// Manual context propagation (for Workers/sdk-trace-base)
+// Manual context propagation (for Workers/sdk-trace-base without context manager)
 const parentSpan = tracer.startSpan('parent');
 const ctx = trace.setSpan(context.active(), parentSpan);
 const childSpan = tracer.startSpan('child', undefined, ctx);
@@ -485,12 +516,12 @@ const activeSpan = trace.getActiveSpan();
 
 // Record exceptions
 try { doWork(); } catch (e) {
-  span.recordException(e);
+  span.recordException(e as Error);
   span.setStatus({ code: SpanStatusCode.ERROR });
 }
 
 // Inject context into outgoing request headers
-const headers = {};
+const headers: Record<string, string> = {};
 propagation.inject(context.active(), headers);
 
 // Extract context from incoming request headers
@@ -506,33 +537,46 @@ const parentCtx = propagation.extract(context.active(), incomingHeaders);
 
 ### Semantic Conventions
 
-Always use the constants from `@opentelemetry/semantic-conventions`:
+Always use the constants from `@opentelemetry/semantic-conventions` (stable exports only):
 
-```js
+```ts
 import {
   ATTR_SERVICE_NAME,
   ATTR_SERVICE_VERSION,
-  ATTR_HTTP_REQUEST_METHOD,    // 'http.request.method'
+  ATTR_HTTP_REQUEST_METHOD,        // 'http.request.method'
   ATTR_HTTP_RESPONSE_STATUS_CODE,  // 'http.response.status_code'
-  ATTR_URL_FULL,               // 'url.full'
-  ATTR_URL_PATH,               // 'url.path'
-  ATTR_CODE_FUNCTION_NAME,     // 'code.function.name'
-  ATTR_CODE_FILE_PATH,         // 'code.filepath'
+  ATTR_URL_FULL,                   // 'url.full'
+  ATTR_URL_PATH,                   // 'url.path'
 } from '@opentelemetry/semantic-conventions';
+
+// Incubating/experimental constants are in a separate entry point:
+// import { ... } from '@opentelemetry/semantic-conventions/incubating';
 ```
 
-### Resource Configuration
+**SDK 2.x note:** The old `SEMRESATTRS_*` / `SemanticResourceAttributes.*` pattern is removed. Use `ATTR_*` constants.
 
-```js
-import { Resource } from '@opentelemetry/resources';
+### Resource Configuration (SDK 2.x)
+
+```ts
+import { resourceFromAttributes, defaultResource } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 
-const resource = new Resource({
+// Simple resource
+const resource = resourceFromAttributes({
   [ATTR_SERVICE_NAME]: 'my-service',
   [ATTR_SERVICE_VERSION]: '1.0.0',
   'deployment.environment': 'production',
 });
+
+// Merge with default resource (includes process, host, OS info)
+const fullResource = defaultResource().merge(
+  resourceFromAttributes({
+    [ATTR_SERVICE_NAME]: 'my-service',
+  }),
+);
 ```
+
+**SDK 2.x note:** `new Resource({...})` is removed. Use `resourceFromAttributes()`. `Resource.default()` is now `defaultResource()`. `Resource.empty()` is now `emptyResource()`.
 
 ### Sampling Strategies
 
@@ -542,6 +586,8 @@ const resource = new Resource({
 | `TraceIdRatioBasedSampler(0.1)` | High-traffic production (sample 10%) |
 | `ParentBasedSampler` | Respect upstream sampling decisions |
 | `AlwaysOffSampler` | Disable tracing entirely |
+
+All samplers exported from `@opentelemetry/sdk-trace-base`.
 
 ## Collector & Backend Setup
 
@@ -600,6 +646,8 @@ service:
 |---------|-----|
 | Using `sdk-trace-node` in Workers | Use `sdk-trace-base` with `BasicTracerProvider` |
 | Using `sdk-node` in browser | Use `sdk-trace-web` with `WebTracerProvider` |
+| Using `new Resource({...})` (removed in 2.x) | Use `resourceFromAttributes({...})` from `@opentelemetry/resources` |
+| Calling `provider.register()` on `BasicTracerProvider` (removed in 2.x) | Use `WebTracerProvider.register()` for browser, or get tracer via `provider.getTracer()` |
 | Forgetting `waitUntil` in Workers | Telemetry silently lost. Always `ctx.waitUntil(provider.forceFlush())` |
 | BatchSpanProcessor in Workers | Spans lost before batch fires. Use `SimpleSpanProcessor` |
 | Missing CORS on collector | Browser silently drops exports. Configure `cors.allowed_origins` |

@@ -134,13 +134,13 @@ export function RouteTracer({ children }: { children: React.ReactNode }) {
 Track complex user flows (checkout, onboarding) as a single long-lived span with step events:
 
 ```tsx
-import { trace } from '@opentelemetry/api';
+import { trace, type Span } from '@opentelemetry/api';
 import { useState, useEffect, useRef } from 'react';
 
 const tracer = trace.getTracer('user-journeys');
 
 export function useJourneyTracker(journeyName: string) {
-  const spanRef = useRef<any>(null);
+  const spanRef = useRef<Span | null>(null);
   const [currentStep, setCurrentStep] = useState<string>('');
 
   useEffect(() => {
@@ -171,27 +171,34 @@ export function useJourneyTracker(journeyName: string) {
 
 ## Web Vitals Integration
 
-Report Core Web Vitals as OTel spans:
+Report Core Web Vitals as OTel spans. Uses `web-vitals` v5+ (v5 removed `onFID`; use `onINP` instead):
 
 ```tsx
 import { useEffect } from 'react';
 import { trace } from '@opentelemetry/api';
 
-export function useWebVitals() {
+interface WebVitalMetric {
+  name: string;
+  value: number;
+  rating: 'good' | 'needs-improvement' | 'poor';
+}
+
+export function useWebVitals(): void {
   useEffect(() => {
     const tracer = trace.getTracer('web-vitals');
-    const reportMetric = (metric: any) => {
+    const reportMetric = (metric: WebVitalMetric): void => {
       const span = tracer.startSpan(`web-vital.${metric.name.toLowerCase()}`, {
         attributes: {
           'web_vital.name': metric.name,
           'web_vital.value': metric.value,
-          'web_vital.rating': metric.rating, // 'good' | 'needs-improvement' | 'poor'
+          'web_vital.rating': metric.rating,
         },
       });
       span.end();
     };
-    import('web-vitals').then(({ onCLS, onFID, onFCP, onLCP, onTTFB, onINP }) => {
-      onCLS(reportMetric); onFID(reportMetric); onFCP(reportMetric);
+    // web-vitals v5: onFID removed, use onINP for responsiveness
+    import('web-vitals').then(({ onCLS, onFCP, onLCP, onTTFB, onINP }) => {
+      onCLS(reportMetric); onFCP(reportMetric);
       onLCP(reportMetric); onTTFB(reportMetric); onINP(reportMetric);
     });
   }, []);
@@ -202,18 +209,21 @@ export function useWebVitals() {
 
 ```ts
 import { trace } from '@opentelemetry/api';
+import type { Middleware } from 'redux';
+
 const tracer = trace.getTracer('state-management');
 
 // Redux middleware
-export const otelReduxMiddleware = (store: any) => (next: any) => (action: any) => {
-  const span = tracer.startSpan(`redux.${action.type}`);
-  span.setAttribute('action.type', action.type);
+export const otelReduxMiddleware: Middleware = (_store) => (next) => (action) => {
+  const { type } = action as { type: string };
+  const span = tracer.startSpan(`redux.${type}`);
+  span.setAttribute('action.type', type);
   try {
     const result = next(action);
     span.end();
     return result;
-  } catch (error: any) {
-    span.recordException(error);
+  } catch (error) {
+    span.recordException(error as Error);
     span.end();
     throw error;
   }
@@ -225,16 +235,47 @@ export const otelReduxMiddleware = (store: any) => (next: any) => (action: any) 
 Sample errors at 100%, user interactions at 50%, general traces at 10%:
 
 ```ts
-import { Sampler, SamplingResult, SamplingDecision } from '@opentelemetry/api';
+import {
+  type Sampler,
+  type SamplingResult,
+  SamplingDecision,
+  type Context,
+  type SpanKind,
+  type Attributes,
+  type Link,
+} from '@opentelemetry/api';
+
+// SamplingDecision has 3 values:
+//   NOT_RECORD (0) — don't record or export
+//   RECORD (1) — record but don't export (isRecording=true, Sampled flag off)
+//   RECORD_AND_SAMPLED (2) — record AND export
+
+interface SamplerConfig {
+  defaultRate: number;
+  errorRate: number;
+  interactionRate: number;
+}
 
 export class FrontendSampler implements Sampler {
-  constructor(private config = {
-    defaultRate: 0.1,
-    errorRate: 1.0,
-    interactionRate: 0.5,
-  }) {}
+  private config: SamplerConfig;
 
-  shouldSample(context: any, traceId: string, spanName: string, spanKind: any, attributes: any) {
+  constructor(config: Partial<SamplerConfig> = {}) {
+    this.config = {
+      defaultRate: 0.1,
+      errorRate: 1.0,
+      interactionRate: 0.5,
+      ...config,
+    };
+  }
+
+  shouldSample(
+    _context: Context,
+    _traceId: string,
+    spanName: string,
+    _spanKind: SpanKind,
+    attributes: Attributes,
+    _links: Link[],
+  ): SamplingResult {
     let rate = this.config.defaultRate;
     if (spanName.startsWith('error.') || attributes?.['error'] === true) {
       rate = this.config.errorRate;
@@ -245,10 +286,10 @@ export class FrontendSampler implements Sampler {
       decision: Math.random() < rate
         ? SamplingDecision.RECORD_AND_SAMPLED
         : SamplingDecision.NOT_RECORD,
-    } as SamplingResult;
+    };
   }
 
-  toString() { return 'FrontendSampler'; }
+  toString(): string { return 'FrontendSampler'; }
 }
 ```
 
@@ -256,11 +297,12 @@ export class FrontendSampler implements Sampler {
 
 | Package | Gzipped Size |
 |---------|-------------|
-| `@opentelemetry/api` | ~5 KB |
-| `@opentelemetry/sdk-trace-web` | ~15 KB |
+| `@opentelemetry/api` | ~5-7 KB |
+| `@opentelemetry/sdk-trace-web` | ~15-20 KB |
 | `@opentelemetry/context-zone` (Zone.js) | ~15 KB |
 | `@opentelemetry/exporter-trace-otlp-http` | ~10 KB |
-| Minimal setup total | ~45-50 KB |
-| `@opentelemetry/auto-instrumentations-web` | Significantly larger |
+| `@opentelemetry/core` | ~10-15 KB |
+| Minimal setup total | ~50-60 KB |
+| Full `@opentelemetry/auto-instrumentations-web` bundle | ~60 KB |
 
-Use individual instrumentation packages for production to minimize bundle size.
+Use individual instrumentation packages for production to minimize bundle size. SDK 2.x improved tree-shakability.
