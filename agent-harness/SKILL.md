@@ -1,6 +1,6 @@
 ---
 name: agent-harness
-description: Use when building a non-trivial application that benefits from separated planning, implementation, and evaluation. Orchestrates a 3-agent team (planner, generator, evaluator) using Claude Code agent teams for long-running application development with sprint-based iteration.
+description: Orchestrates a 3-agent team (planner, generator, evaluator) using Claude Code agent teams to build applications through sprint-based iteration with independent QA between sprints. Use when building a non-trivial application from a brief description, when frontend design quality matters (the evaluator catches "AI slop"), or when implementation work should be adversarially evaluated before being considered done.
 ---
 
 # Agent Harness: 3-Agent Team for Application Development
@@ -36,7 +36,7 @@ Agent teams are experimental. Add to your `settings.json` or environment:
 
 ### 2. Playwright MCP (recommended)
 
-The evaluator works best with [Playwright MCP](https://github.com/anthropics/mcp-playwright) for browser-based testing. If unavailable, the evaluator falls back to: running test suites → inspecting logs/screenshots → reading code. See `evaluator-prompt.md` for the full fallback hierarchy.
+The evaluator works best with [Playwright MCP](https://github.com/microsoft/playwright-mcp) for browser-based testing. If unavailable, the evaluator falls back to: running test suites → inspecting logs/screenshots → reading code. See `evaluator-prompt.md` for the full fallback hierarchy.
 
 ### 3. Display Mode (optional)
 
@@ -122,20 +122,26 @@ evaluator reviews contract → generator implements → evaluator tests → loop
 
 ### Quality Gates via Hooks (Optional)
 
-For stricter enforcement, add hooks to `.claude/hooks.json`:
+For stricter enforcement, add hooks to the `hooks` section of `.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "TaskCompleted": [
       {
-        "command": "bash -c 'task_id=\"$TASK_ID\"; if echo \"$task_id\" | grep -q \"sprint.*implement\"; then echo \"Run evaluator before marking complete\" && exit 2; fi'",
-        "description": "Prevent marking implementation tasks complete before evaluation"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if echo \"$TASK_ID\" | grep -q \"sprint.*implement\"; then echo \"Run evaluator before marking complete\" >&2 && exit 2; fi'"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Exit code 2 blocks the task completion and feeds the message back to the agent.
 
 ## Adaptation Guide
 

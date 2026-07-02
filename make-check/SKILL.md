@@ -1,6 +1,6 @@
 ---
 name: make-check
-description: Use when the user invokes "make-check" or asks for a make-check pod, or when high-stakes engineering work (significant features, risky refactors, deep investigations, plans about to be executed) warrants iterative multi-agent adversarial review before being considered done
+description: Runs a pod of three agents (Maker, Checker, Decider) through repeated build → adversarial review → arbitration rounds until the work is independently declared done. Use when the user invokes "make-check" or asks for a make-check pod, or when high-stakes engineering work (significant features, risky refactors, production migrations, deep investigations, plans about to be executed) warrants iterative multi-agent adversarial review before being considered done.
 ---
 
 # Make-Check
@@ -31,7 +31,7 @@ The unit of work can be anything: a plan, an investigation writeup, a refactor, 
 
 ## The Three Roles
 
-Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type: "general-purpose"` (unless the work matches a more specific agent type, e.g. `feature-dev:code-reviewer` for the Checker on a code change). Isolated context per role is load-bearing — it's what makes the Checker's review adversarial rather than self-confirming.
+Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type: "general-purpose"` (or a more specific agent type when one is available and fits the role — e.g. a code-reviewer agent for the Checker on a code change). Isolated context per role is load-bearing — it's what makes the Checker's review adversarial rather than self-confirming.
 
 ### Maker
 

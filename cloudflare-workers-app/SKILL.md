@@ -1,6 +1,6 @@
 ---
 name: cloudflare-workers-app
-description: Use when building a new web application with Cloudflare Workers, D1 database, Better Auth authentication, Hono API, or React SPA frontend with Tailwind and Zustand - covers project scaffolding, architecture patterns, and deployment
+description: Scaffolds and builds full-stack web apps deployed as a single Cloudflare Worker - Hono API, D1 database, Better Auth email/password sessions, and a React SPA with Tailwind, Zustand, and React Query. Use when starting a new web app on Cloudflare Workers, adding Better Auth or D1 to a Workers project, or setting up a monorepo with API and web packages - covers scaffolding, architecture patterns, known pitfalls, and deployment.
 ---
 
 # Cloudflare Workers Full-Stack App

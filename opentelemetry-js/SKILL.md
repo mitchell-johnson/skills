@@ -1,6 +1,6 @@
 ---
 name: opentelemetry-js
-description: Use when adding OpenTelemetry tracing, metrics, or observability to TypeScript applications - covers Cloudflare Workers (V8 isolates), React browser apps, and Node.js with OTLP export, context propagation, and collector configuration
+description: Adds OpenTelemetry tracing and observability to TypeScript applications across three runtimes - Cloudflare Workers (V8 isolates), React/browser apps, and Node.js - covering SDK 2.x package selection, OTLP export, context propagation, sampling, and collector configuration. Use when instrumenting TypeScript code with OTel, debugging missing spans or silently dropped telemetry, or choosing between direct export and a collector.
 ---
 
 # OpenTelemetry for TypeScript
@@ -28,7 +28,7 @@ OpenTelemetry (OTel) provides vendor-neutral instrumentation for distributed tra
 - You just need simple `console.log` debugging
 
 **Supporting files:**
-- `react-patterns.md` — Extended React patterns: TracingProvider, route tracing with render duration, user journey tracking, Web Vitals, Redux middleware, custom frontend sampler, bundle size estimates
+- `react-patterns.md` — Extended React patterns: TracingProvider, route tracing with render duration, error boundary integration, user journey tracking, Web Vitals, Redux middleware, custom frontend sampler, bundle size estimates
 - `collector-reference.md` — Collector configs, backend comparison, Cloudflare native Destinations, Docker Compose, NGINX reverse proxy, deployment patterns
 
 ## Quick Reference: Which Packages for Which Runtime
@@ -373,7 +373,7 @@ receivers:
 
 ### React-Specific Patterns
 
-See `react-patterns.md` for extended patterns: TracingProvider context, component lifecycle tracing, user journey tracking, Web Vitals integration, Redux/Zustand middleware, custom frontend sampler, and bundle size estimates.
+See `react-patterns.md` for extended patterns: TracingProvider context, component lifecycle tracing, route tracing with render duration, error boundary integration, user journey tracking, Web Vitals integration, Redux/Zustand middleware, custom frontend sampler, and bundle size estimates.
 
 **Custom hook for manual spans:**
 
@@ -411,70 +411,6 @@ function UserProfile({ userId }: { userId: string }) {
       return response.json();
     });
   }, [userId]);
-}
-```
-
-**Route change tracking (React Router):**
-
-```tsx
-import { trace } from '@opentelemetry/api';
-import { useLocation } from 'react-router-dom';
-import { useEffect, useRef } from 'react';
-
-export function useRouteTracing(): void {
-  const location = useLocation();
-  const tracer = trace.getTracer('react-router');
-  const prevPath = useRef(location.pathname);
-
-  useEffect(() => {
-    if (prevPath.current !== location.pathname) {
-      const span = tracer.startSpan('route.change', {
-        attributes: {
-          'route.from': prevPath.current,
-          'route.to': location.pathname,
-        },
-      });
-      span.end();
-      prevPath.current = location.pathname;
-    }
-  }, [location.pathname]);
-}
-```
-
-**Error boundary integration:**
-
-```tsx
-import React from 'react';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
-
-interface ErrorBoundaryProps {
-  children: React.ReactNode;
-}
-
-interface ErrorBoundaryState {
-  hasError: boolean;
-}
-
-class TracedErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { hasError: false };
-
-  static getDerivedStateFromError(): ErrorBoundaryState {
-    return { hasError: true };
-  }
-
-  componentDidCatch(error: Error, info: React.ErrorInfo): void {
-    const tracer = trace.getTracer('error-boundary');
-    const span = tracer.startSpan('react.error');
-    span.recordException(error);
-    span.setAttribute('react.component_stack', info.componentStack || '');
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.end();
-  }
-
-  render(): React.ReactNode {
-    if (this.state.hasError) return <div>Something went wrong.</div>;
-    return this.props.children;
-  }
 }
 ```
 
@@ -605,40 +541,7 @@ Several backends accept OTLP directly - no collector needed:
 
 ### With Collector
 
-For more control (batching, sampling, multi-backend fan-out), deploy an OTel Collector:
-
-```yaml
-# otel-collector-config.yaml
-receivers:
-  otlp:
-    protocols:
-      http:
-        endpoint: "0.0.0.0:4318"
-        cors:
-          allowed_origins: ["https://yourdomain.com", "http://localhost:*"]
-          allowed_headers: ["*"]
-
-processors:
-  batch:
-    timeout: 5s
-    send_batch_size: 1024
-  memory_limiter:
-    check_interval: 1s
-    limit_mib: 512
-
-exporters:
-  otlphttp:
-    endpoint: "https://your-backend/v1/traces"
-    headers:
-      Authorization: "Bearer YOUR_KEY"
-
-service:
-  pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp]
-```
+For more control (batching, sampling, multi-backend fan-out), deploy an OTel Collector. Full collector config (receivers, processors, per-backend exporters), Docker Compose for local dev with Jaeger, and an NGINX reverse-proxy setup are in `collector-reference.md`.
 
 ## Common Mistakes
 
