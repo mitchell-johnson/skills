@@ -129,6 +129,45 @@ export function RouteTracer({ children }: { children: React.ReactNode }) {
 // </BrowserRouter>
 ```
 
+## Error Boundary Integration
+
+Record render errors as OTel spans from a class error boundary:
+
+```tsx
+import React from 'react';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+class TracedErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    const tracer = trace.getTracer('error-boundary');
+    const span = tracer.startSpan('react.error');
+    span.recordException(error);
+    span.setAttribute('react.component_stack', info.componentStack || '');
+    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+    span.end();
+  }
+
+  render(): React.ReactNode {
+    if (this.state.hasError) return <div>Something went wrong.</div>;
+    return this.props.children;
+  }
+}
+```
+
 ## User Journey Tracking (Multi-Step Flows)
 
 Track complex user flows (checkout, onboarding) as a single long-lived span with step events:
