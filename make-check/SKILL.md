@@ -1,19 +1,19 @@
 ---
 name: make-check
-description: Runs a pod of three agents (Maker, Checker, Decider) through repeated build → adversarial review → arbitration rounds until the work is independently declared done. Use when the user invokes "make-check" or asks for a make-check pod, or when high-stakes engineering work (significant features, risky refactors, production migrations, deep investigations, plans about to be executed) warrants iterative multi-agent adversarial review before being considered done. The review loop runs once on the completed work, not per phase of a plan.
+description: Use when the user invokes "make-check" or asks for a make-check pod, or when high-stakes engineering work (significant features, risky refactors, production migrations, deep investigations, plans about to be executed) warrants independent multi-agent adversarial review (Maker / Checker / Decider) before being considered done.
 ---
 
 # Make-Check
 
 ## Overview
 
-Make-check is a multi-agent engineering pattern: a **pod** of three agents takes one unit of work through repeated rounds of build → adversarial review → arbitration until the third agent declares the work done.
+Make-check is a multi-agent engineering pattern: a **pod** of three roles (Maker, Checker, Decider) takes one unit of work through build → adversarial review → arbitration until the third role independently declares the work done.
 
 **Core principle:** Separation of duties beats self-review. The agent producing the work cannot also judge it; an independent reviewer hunts for problems; a third agent arbitrates and owns the final call on what gets fixed.
 
-The unit of work can be anything: a plan, an investigation writeup, a refactor, a feature implementation, a bug fix, a piece of documentation. Make-check is agnostic to what's being made — it only structures how it's reviewed.
+**Calibrated for strong models.** Top-tier models (Fable/Mythos-class, Opus-tier) get most work right the first time, so review is batched: the Maker builds large chunks of the plan between reviews, one early checkpoint catches direction errors before they propagate, and the full review loop runs once on the completed whole. Review effort concentrates where strong Makers still fail — systemic direction errors and cross-phase integration seams — not on per-phase rework.
 
-**Timing:** the review loop runs on the **completed** unit of work, not on each phase of building it. See [When the Loop Runs](#when-the-loop-runs).
+The unit of work can be anything: a plan, an investigation writeup, a refactor, a feature implementation, a bug fix, a piece of documentation. Make-check is agnostic to what's being made — it only structures how it's reviewed.
 
 ## When to Use
 
@@ -30,26 +30,28 @@ The unit of work can be anything: a plan, an investigation writeup, a refactor, 
 - Tasks with hard time pressure where the user wants the boring fastest path
 - Work already protected by strong automated checks (comprehensive tests, type system, linting) doing the same job
 - Exploratory throwaway code where iteration cost matters more than quality
-- **A single phase or stage of a larger multi-phase build** — wait until the whole thing is done (see [When the Loop Runs](#when-the-loop-runs))
+- **A single phase of a larger build as its own pod** — phases are the Maker's build sequence; review points are set by the [Review Cadence](#review-cadence)
 
-## When the Loop Runs
+## Review Cadence
 
-**One pod covers one complete piece of work, reviewed once it is complete.** The Maker still builds in phases; the Checker/Decider loop does not run per phase.
+The Maker builds in **batches** of phases. Review points are scheduled up front by plan size:
 
-- **Maker:** works through the plan's stages in order, keeping each stage compiling and tested, committing working code as it goes. Phased building is still the right way to build.
-- **Checker/Decider:** do not engage until the Maker reports the whole unit of work functionally complete — all stages done, tests green. Then the loop runs over the finished body of work and iterates to `DONE`.
+| Plan size | Review points |
+|---|---|
+| 1–3 phases | Full review loop at completion only |
+| 4–9 phases | Checkpoint after ~the first 2 phases, then full loop at completion |
+| 10+ phases | Checkpoints after ~20% and ~60% of the phases, then full loop at completion |
 
-So a five-stage feature is **one** pod with one review loop at the end, not five pods or five review rounds — the Maker's internal stages are invisible to the loop.
+Worked example: a 10-phase plan (5 steps per phase) → Maker builds phases 1–2 → **checkpoint** → phases 3–6 → **checkpoint** → phases 7–10 → **completion loop** to `DONE`.
 
-**Why:** per-phase review critiques half-finished work, generates fix lists for code a later stage was going to change anyway, and — because each reviewer only ever sees one slice — systematically misses the cross-phase integration bugs that are the expensive ones. A Checker looking at the completed work sees the whole shape of it, including how the phases fit together.
+There are two kinds of review point:
 
-**Review before completion only when:**
+- **Checkpoint — single pass.** One Checker pass + one Decider pass, scoped to the phases built so far. The fix list is applied by the Maker at the start of the next batch; if nothing needs fixing the Decider outputs `CONTINUE`. Checkpoints never iterate.
+- **Completion loop — iterates.** The full Checker → Decider → Maker loop over the finished whole, repeating until the Decider outputs `DONE` (cap 5 rounds).
 
-- A phase is independently shippable and will be committed/deployed before the rest lands
-- A phase is irreversible (schema migrations, data backfills, production deploys, published API changes)
-- The overall work is large enough that a flaw found at the end would be prohibitively expensive to unwind — in that case, split it into genuinely separate units of work with their own pods, rather than adding review rounds inside one pod
+**Why an early checkpoint:** cheap insurance against systemic errors — wrong architecture, misread requirements, convention drift — being propagated across every remaining phase. **Why not per-phase:** per-phase review critiques half-finished work, generates fixes for code a later phase rewrites anyway, and still misses the cross-phase integration bugs that matter most.
 
-When in doubt, prefer one pod at the end. Splitting is a decomposition decision made up front, not a mid-build reflex.
+**Pull a review earlier than the cadence only when** a phase is independently shippable and will be committed/deployed before the rest lands, or a phase is irreversible (schema migrations, data backfills, production deploys, published API changes).
 
 ## The Three Roles
 
@@ -57,17 +59,20 @@ Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type:
 
 ### Maker
 
-- Produces the initial **artifact** in round 1; in later rounds, implements the Decider's fix list to produce the next artifact
-- Round 1 covers the **whole** unit of work. Build it in phases if the work has phases — stage by stage, each stage compiling and tested — but do not hand anything to the Checker until every phase is done
-- The artifact must be concrete, reviewable, and **complete** — actual code/diffs for implementation work, a written plan for planning work, a findings doc for investigations. "I'd do X next", "phase 1 of 4 done", or a partial implementation is NOT a valid artifact
+- Builds the unit of work in batches per the cadence — within a batch, works phase by phase, keeping each phase compiling and tested, committing working code as it goes
+- At the start of each batch after the first, applies the previous checkpoint's fix list **before** building new phases
+- In the completion loop, implements the Decider's fix list to produce the next version
+- Every hand-off to a review point must be concrete and reviewable: actual code/diffs with test and build output pasted verbatim for implementation work, a written plan for planning work, a findings doc for investigations — plus, at checkpoints, one line stating which phases are built and which are not
 - May NOT self-critique or anticipate the Checker — trust the role separation
+- May be **several Makers running concurrently** when phases are independent (see [Parallel Makers](#parallel-makers))
 - Has full edit/bash tools by default for implementation work
 
 ### Checker
 
-- Reviews the current artifact adversarially but collaboratively, as a **finished whole** — including how its parts fit together, not just each part in isolation
-- Must be given the **same context** as the Maker (codebase access, conventions, project docs) so it can flag drift from conventions, not just internal logic flaws
-- Hunts for: logic errors, edge cases, missing tests, security gaps, performance pitfalls, unclear naming, fragile assumptions, missing error handling, broken invariants, convention drift, and integration seams between the parts the Maker built at different times
+- Reviews adversarially but collaboratively, and must be given the **same context** as the Maker (codebase access, conventions, project docs) so it can flag drift from conventions, not just internal logic flaws
+- At a **checkpoint**: reviews the phases built so far as a coherent partial whole — direction, architecture, conventions, and integration of what exists. Unbuilt phases are NOT findings; never flag planned-but-unbuilt work as missing
+- At **completion**: reviews the finished whole — including how parts built at different times, or by different parallel Makers, fit together
+- Hunts for: logic errors, edge cases, missing tests, security gaps, performance pitfalls, unclear naming, fragile assumptions, missing error handling, broken invariants, convention drift, and integration seams
 - Produces a **numbered list** of specific, actionable recommendations — file paths, line numbers, suggested change where possible, severity (blocker / important / nice-to-have), and one-line rationale per item
 - Read-only: no Edit/Write tools — keeps its hands off the artifact
 - Does NOT prioritize across recommendations; that's the Decider's job
@@ -81,132 +86,138 @@ Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type:
   - **modify** → the adjusted version goes on the fix list (Decider writes the modified instruction)
   - **reject** → does NOT go on the fix list (with one-line reason for the audit trail)
 - May **add fixes** the Checker missed — these go on the fix list too
-- The fix list is what the Maker will implement next round; if it's empty, output the literal token `DONE`
-- A Checker round with "no issues found" plus a Decider with no additions = automatic `DONE`
-- Read-only tools; owns the iteration-stop decision
+- **At a checkpoint:** outputs the fix list (Maker applies it at the start of the next batch), or exactly `CONTINUE` if it's empty. Never `DONE` at a checkpoint
+- **At completion:** outputs the fix list, or exactly `DONE` if it's empty. If every surviving item is nice-to-have, output `DONE` plus an "optional polish" list for the user — don't send the Maker back for aesthetics
+- Read-only tools; owns the stop decision
+
+## Parallel Makers
+
+When the plan contains independent phases, run multiple Makers concurrently instead of one Maker serially:
+
+- **Derive the dependency map first.** Phases are independent when none reads or writes another's outputs and they touch disjoint files/modules. When in doubt, treat them as dependent.
+- **One Maker per independent group,** dispatched in a single message so they run concurrently. Dependent phases stay serial — with one Maker, or scheduled after the batch they depend on.
+- **Overlapping files → isolate.** If groups might touch the same files, give each Maker `isolation: "worktree"` and merge the worktrees when the batch completes; otherwise partition by file ownership.
+- **Review is always unified.** The Checker reviews the merged, integrated state — never one Maker's slice alone; the seams between parallel slices are exactly where the bugs live. Checkpoint cadence counts phases completed across all Makers.
 
 ## The Loop
 
 ```
-1. Maker → builds the COMPLETE unit of work (in phases if needed) → v1
-2. Checker reviews v(n) → produces recommendations
-3. Decider reviews v(n) + recommendations → outputs fix list OR "DONE"
-4. If DONE → exit; the pod's final artifact is v(n)
-5. Else Maker applies fix list → produces v(n+1)
-6. GOTO 2
+batches = partition(plan)                 # cadence table + dependency map
+work = ∅
+for each batch except the last:
+    work += Makers build batch            # parallel where independent; apply pending fixes first
+    recs  = Checker(work, scope = phases built so far)    # checkpoint: single pass
+    fixes = Decider(work, recs)                           # fix list or CONTINUE
+work += Makers build final batch          # apply pending fixes first
+for round in 1..5:                        # completion loop
+    recs = Checker(work, scope = whole)
+    decision = Decider(work, recs)
+    if decision == DONE: return work
+    work = Maker applies decision's fix list
+surface_to_user(work, "iteration cap reached; remaining concerns: ...")
 ```
 
-**Iteration cap:** Stop at 5 rounds even if the Decider hasn't signaled DONE. If you hit the cap, surface remaining issues to the user — don't quietly ship. A pod that won't converge is a signal the work needs human input or a different decomposition.
+**Convergence expectation:** with top-tier models in every role, the completion loop usually reaches `DONE` in 1–2 rounds. Three or more rounds of churn is a signal the work needs human input or a different decomposition — surface it rather than grinding to the cap.
+
+**Iteration cap:** stop the completion loop at 5 rounds even if the Decider hasn't signaled `DONE`. If you hit the cap, surface remaining issues to the user — don't quietly ship.
 
 ## Pods and Parallelism
 
-- One pod = one Maker + one Checker + one Decider + one **complete** unit of work
-- A multi-phase piece of work is one unit, not one unit per phase — the phases are the Maker's build sequence, not pod boundaries
+- One pod = one **complete** unit of work + its Makers + one Checker + one Decider
+- Parallel **Makers** live inside one pod (independent phases of one unit); parallel **pods** are for independent units of work
 - Independent units of work → spawn N pods in parallel from the orchestrating session
 - Pods do not share state during their loops; the orchestrator only sees each pod's final artifact
 - "Independent" means the units don't read or write each other's outputs mid-flight — if they do, run them sequentially or as one larger pod
 
 ## Implementation
 
-The orchestrating session drives the loop with real `Agent` tool calls. State (the current artifact, the Checker's recommendations, the Decider's fix list) lives in the orchestrator and is pasted verbatim into each subagent's prompt — subagents have no shared memory.
+The orchestrating session drives the loop with real `Agent` tool calls. State (the current artifact, the Checker's recommendations, the Decider's fix list, which phases are built) lives in the orchestrator and is pasted verbatim into each subagent's prompt — subagents have no shared memory.
 
-**Model: all three roles MUST run on the strongest available reasoning model.** Prefer `mythos` if it appears in the `Agent` tool's `model` enum; otherwise use `opus`. Never run a make-check role on `sonnet` or `haiku` — the adversarial review and arbitration quality depends on top-tier reasoning, and weaker models cause the Checker to miss issues and the Decider to rubber-stamp. If you cannot pass `model: "opus"` (or `"mythos"`) to the `Agent` tool in the current environment, surface that to the user before proceeding — do not silently fall back.
+**Model: all three roles MUST run on the strongest available reasoning model.** Prefer `fable` if it appears in the `Agent` tool's `model` enum (Fable/Mythos-class); otherwise use `opus`. Never run a make-check role on `sonnet` or `haiku` — the adversarial review and arbitration quality depends on top-tier reasoning, and weaker models cause the Checker to miss issues and the Decider to rubber-stamp. If you cannot pass `model: "fable"` (or `"opus"`) to the `Agent` tool in the current environment, surface that to the user before proceeding — do not silently fall back.
 
-**Round-1 Maker dispatch:**
+**Maker dispatch (per batch):**
 
 ```
 Agent({
   subagent_type: "general-purpose",
-  model: "opus",   // or "mythos" if available
-  description: "Make-check Maker — round 1",
-  prompt: `You are the MAKER in a make-check pod. Produce the initial
-  artifact for review. Do not self-critique or anticipate a reviewer.
+  model: "fable",   // or "opus" if fable is not in the model enum
+  description: "Make-check Maker — batch 1 (phases 1–2 of 10)",
+  prompt: `You are the MAKER in a make-check pod. Do not self-critique
+  or anticipate a reviewer.
 
-  Build the ENTIRE task below before returning. If it has phases or
-  stages, work through them in order and keep each one compiling and
-  tested — but do not stop and hand back a partial artifact. Review
-  happens once, on the completed work.
+  Build phases <a>–<b> of the task below. Work phase by phase, keeping
+  each phase compiling and tested. If a pending fix list is included,
+  apply it BEFORE building new phases.
 
-  TASK: <original task>
+  TASK: <original task / full plan>
+  YOUR PHASES: <a>–<b> of <N>
+  PENDING FIX LIST: <paste Decider output, or "none">
 
-  Output a single response containing the complete artifact:
-    - For implementation work: list of files changed with diffs, plus tests
-    - For a plan: the full plan doc
-    - For an investigation: the findings + evidence`
+  Return the concrete artifact for your phases — files changed with
+  diffs, tests, and test/build output pasted verbatim — and state
+  which phases are now built.`
 })
 ```
 
-**Checker dispatch (each round):**
+For **parallel Makers**, dispatch several of these in ONE message, one per independent phase group; add `isolation: "worktree"` when file ownership overlaps, and merge before any review.
+
+**Checker dispatch (checkpoint or completion):**
 
 ```
 Agent({
   subagent_type: "general-purpose",
-  model: "opus",   // or "mythos" if available
-  description: "Make-check Checker — round N",
+  model: "fable",   // or "opus"
+  description: "Make-check Checker — checkpoint 1 | completion round N",
   prompt: `You are the CHECKER in a make-check pod. Adversarial but
-  collaborative review of the artifact below. It is a COMPLETED unit of
-  work — review it as a whole, including how its parts fit together.
+  collaborative review. Read-only — do not edit anything.
+
+  SCOPE — one of:
+    CHECKPOINT: phases <1>–<k> of <N> are built; the rest are not.
+    Review what exists as a coherent partial whole — direction,
+    architecture, conventions, integration. Unbuilt phases are NOT
+    findings.
+    COMPLETION: the work is finished. Review it as a whole, including
+    how parts built at different times or by parallel Makers fit
+    together.
+
   Hunt for logic errors, edge cases, security gaps, missing tests,
   performance pitfalls, fragile assumptions, convention drift, and
-  integration seams between parts built at different times.
-  Read-only — do not edit.
+  integration seams.
 
   Output a NUMBERED list. Each item: file:line, suggested change,
   severity (blocker | important | nice-to-have), one-line rationale.
   Do NOT prioritize across items. If nothing is wrong, output exactly:
   "no issues found".
 
-  ARTIFACT:
-  <paste artifact verbatim>`
+  ARTIFACT: <paste artifact or file path>`
 })
 ```
 
-**Decider dispatch (each round):**
+**Decider dispatch (each review point):**
 
 ```
 Agent({
   subagent_type: "general-purpose",
-  model: "opus",   // or "mythos" if available
-  description: "Make-check Decider — round N",
-  prompt: `You are the DECIDER. For each recommendation: accept (goes on
-  fix list unchanged), modify (write the adjusted instruction that goes
-  on the fix list), or reject (with one-line reason; does NOT go on fix
-  list). You may add fixes the Checker missed.
+  model: "fable",   // or "opus"
+  description: "Make-check Decider — checkpoint 1 | completion round N",
+  prompt: `You are the DECIDER in a make-check pod. For each
+  recommendation: accept (goes on fix list unchanged), modify (write
+  the adjusted instruction), or reject (one-line reason; stays off the
+  fix list). You may add fixes the Checker missed.
 
-  Output the ordered fix list for the Maker. If the fix list would be
-  empty, output exactly: DONE.
+  This is a <CHECKPOINT | COMPLETION> review.
+  - CHECKPOINT: output the ordered fix list (applied at the start of
+    the Maker's next batch), or exactly CONTINUE if it is empty.
+  - COMPLETION: output the ordered fix list, or exactly DONE if it is
+    empty. If every surviving item is nice-to-have, output DONE plus an
+    "optional polish" list instead of another fix round.
 
   ARTIFACT: <paste artifact>
   RECOMMENDATIONS: <paste Checker output>`
 })
 ```
 
-**Round-N Maker dispatch (applying fixes):**
-
-```
-Agent({
-  subagent_type: "general-purpose",
-  model: "opus",   // or "mythos" if available
-  description: "Make-check Maker — round N",
-  prompt: `You are the MAKER. Apply this fix list to the current
-  artifact. Implement each fix faithfully; do not skip or reinterpret.
-
-  CURRENT ARTIFACT: <paste>
-  FIX LIST: <paste Decider output>`
-})
-```
-
-**Orchestrator loop:**
-
-```
-artifact = dispatch(Maker, round=1)   # complete unit of work, all phases done
-for round in 2..5:
-    recs = dispatch(Checker, artifact)
-    decision = dispatch(Decider, artifact, recs)
-    if decision == "DONE": return artifact
-    artifact = dispatch(Maker, artifact, decision)
-surface_to_user(artifact, "iteration cap reached; remaining concerns: ...")
-```
+**Dual-lens Checker (optional, for large or high-stakes completion reviews):** dispatch two Checkers in parallel with different lenses — one on correctness/security/tests, one on design/simplicity/conventions — and give the single Decider both lists to arbitrate.
 
 **Large artifacts:** if the artifact won't fit in a prompt, write it to a file (e.g. `/tmp/make-check-pod-N/v3.md`) and pass the path. Each role reads from disk.
 
@@ -214,7 +225,7 @@ surface_to_user(artifact, "iteration cap reached; remaining concerns: ...")
 
 **Parallel pods:** dispatch multiple pod orchestrators concurrently for independent units of work — they don't share state.
 
-**Sequential pods:** for chained work (plan-pod → implementation-pod), the implementation pod's round-1 Maker is given the plan pod's final artifact as input.
+**Sequential pods:** for chained work (plan-pod → implementation-pod), the implementation pod's first Maker is given the plan pod's final artifact as input.
 
 ## Common Mistakes
 
@@ -223,25 +234,27 @@ surface_to_user(artifact, "iteration cap reached; remaining concerns: ...")
 | Same agent plays Maker and Checker | Eliminates the adversarial review that gives the pattern its value |
 | Checker softens findings to be "nice" | Useful issues stay hidden; the pod converges on something mediocre |
 | Decider rubber-stamps everything | Becomes a pass-through; no real arbitration happens |
-| No iteration cap | Loop can churn indefinitely on aesthetic disagreements |
+| Reviewing after every phase | Critiques half-finished work, churns on code later phases rewrite, still misses cross-phase bugs — batch per the cadence table |
+| Zero checkpoints on a 10+ phase build | A systemic error made in phase 1 propagates through nine more phases before anyone looks |
+| Iterating at a checkpoint | Checkpoints are single-pass; iteration belongs to the completion loop |
+| Checker flags unbuilt phases at a checkpoint | Turns a scoped review into noise; state the scope explicitly in the Checker prompt |
+| Parallel Makers on overlapping files without worktree isolation | Clobbered edits and silent merge conflicts |
+| Reviewing one parallel Maker's slice in isolation | Misses exactly the parallel-seam bugs unified review exists to catch |
 | Sharing chat context across roles | Defeats independence; Checker absorbs Maker's framing |
 | Using make-check on trivial work | Burns tokens and time for no quality gain |
-| Skipping the loop after one round | The pattern's value is in iteration, not just one review |
-| Running a Checker/Decider round after each phase of a plan | Critiques half-finished work, churns on code a later phase rewrites, and still misses cross-phase integration bugs |
-| Handing the Checker a partial artifact ("phase 1 of 4 done") | The loop reviews completed work; a partial artifact makes the review's findings provisional and its fix list wasted effort |
-| Maker tries to pre-empt the Checker | Wastes Maker effort on guessing; trust the role separation |
-| Running any role on `sonnet` / `haiku` to save tokens | Weak reasoning kills review quality; use `opus` (or `mythos` if available), or surface the constraint to the user |
+| Skipping the Checker because "the Maker is a strong model" | Strong models still make systemic and integration errors; independent review is the pattern's whole value |
+| Running any role on `sonnet` / `haiku` to save tokens | Weak reasoning kills review quality; use `fable` (or `opus`), or surface the constraint to the user |
 
 ## Quick Reference
 
 | | Maker | Checker | Decider |
 |---|---|---|---|
-| Reads | Task / fix list | Current artifact | Artifact + recommendations |
-| Produces | Complete artifact (built in phases if needed) | Numbered recommendations | Fix list OR `DONE` |
-| Constraints | No self-review | No direct edits | Must justify rejects |
+| Reads | Task + assigned phases + pending fix list | Artifact + scope (checkpoint or completion) | Artifact + recommendations + scope |
+| Produces | Batch artifact with verbatim test output | Numbered recommendations | Fix list, `CONTINUE` (checkpoint), or `DONE` (completion) |
+| Constraints | No self-review; may run in parallel | No edits; respect scope | Must justify rejects |
 | Context | Fresh subagent | Fresh subagent | Fresh subagent |
-| Termination authority | None | None | Owns `DONE` |
+| Termination authority | None | None | Owns `CONTINUE` / `DONE` |
 
 ## Real-World Fit
 
-Make-check trades latency and tokens for quality. Use it when the cost of a missed issue (production bug, lost data, security incident, bad architectural commitment) outweighs the cost of 2-4 extra subagent rounds. For everything else, single-agent execution is faster and usually fine.
+Make-check trades latency and tokens for quality. Use it when the cost of a missed issue (production bug, lost data, security incident, bad architectural commitment) outweighs the cost of a few extra subagent rounds. With strong models the overhead is modest — typically one checkpoint, one or two completion rounds — but for everything trivial, single-agent execution is still faster and usually fine.
