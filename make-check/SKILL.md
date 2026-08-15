@@ -9,9 +9,9 @@ description: Use when the user invokes "make-check" or asks for a make-check pod
 
 Make-check is a multi-agent engineering pattern: a **pod** of three roles (Maker, Checker, Decider) takes one unit of work through build → adversarial review → arbitration until the third role independently declares the work done.
 
-**Core principle:** Separation of duties beats self-review. The agent producing the work cannot also judge it; an independent reviewer hunts for problems; a third agent arbitrates and owns the final call on what gets fixed.
+**Core principle:** Separation of duties provides independent verification. While the Maker is free (and encouraged) to self-check, test, and validate its own output to catch obvious issues early, the agent producing the work cannot be the sole judge; an independent reviewer hunts for blind spots and edge cases, and a third agent arbitrates and owns the final call on what gets fixed.
 
-**Calibrated for strong models.** Top-tier models (Fable/Mythos-class, Opus-tier) get most work right the first time, so review is batched: the Maker builds large chunks of the plan between reviews, one early checkpoint catches direction errors before they propagate, and the full review loop runs once on the completed whole. Review effort concentrates where strong Makers still fail — systemic direction errors and cross-phase integration seams — not on per-phase rework.
+**Batched review cadence.** Review is batched so the Maker builds chunks of the plan between reviews: early checkpoints catch direction errors before they propagate, and the full review loop runs once on the completed whole. Review effort concentrates where independent review matters most — systemic direction errors and cross-phase integration seams — not on per-phase rework.
 
 The unit of work can be anything: a plan, an investigation writeup, a refactor, a feature implementation, a bug fix, a piece of documentation. Make-check is agnostic to what's being made — it only structures how it's reviewed.
 
@@ -61,9 +61,9 @@ Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type:
 
 - Builds the unit of work in batches per the cadence — within a batch, works phase by phase, keeping each phase compiling and tested, committing working code as it goes
 - At the start of each batch after the first, applies the previous checkpoint's fix list **before** building new phases
-- In the completion loop, implements the Decider's fix list to produce the next version
+- In the completion loop, implements the Decider's fix list (equipped with diagnostic context from the Checker and out-of-scope boundaries from the Decider) to produce the next version
 - Every hand-off to a review point must be concrete and reviewable: actual code/diffs with test and build output pasted verbatim for implementation work, a written plan for planning work, a findings doc for investigations — plus, at checkpoints, one line stating which phases are built and which are not
-- May NOT self-critique or anticipate the Checker — trust the role separation
+- Self-checking, running automated tests, and validating work before handoff is encouraged to catch obvious issues early
 - May be **several Makers running concurrently** when phases are independent (see [Parallel Makers](#parallel-makers))
 - Has full edit/bash tools by default for implementation work
 
@@ -71,7 +71,11 @@ Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type:
 
 - Reviews adversarially but collaboratively, and must be given the **same context** as the Maker (codebase access, conventions, project docs) so it can flag drift from conventions, not just internal logic flaws
 - At a **checkpoint**: reviews the phases built so far as a coherent partial whole — direction, architecture, conventions, and integration of what exists. Unbuilt phases are NOT findings; never flag planned-but-unbuilt work as missing
-- At **completion**: reviews the finished whole — including how parts built at different times, or by different parallel Makers, fit together
+- At **completion (Round 1)**: reviews the finished whole — including how parts built at different times, or by different parallel Makers, fit together
+- At **completion (Round 2+)**: operates in **verification and regression mode**. It receives the prior round's decisions (accepted fixes + rejected items) to:
+  1. Verify whether accepted fixes were applied properly and resolved the root problem
+  2. Check for regressions or new bugs introduced by the fixes
+  3. Avoid re-flagging items already rejected by the Decider unless new evidence or broken invariants emerged
 - Hunts for: logic errors, edge cases, missing tests, security gaps, performance pitfalls, unclear naming, fragile assumptions, missing error handling, broken invariants, convention drift, and integration seams
 - Produces a **numbered list** of specific, actionable recommendations — file paths, line numbers, suggested change where possible, severity (blocker / important / nice-to-have), and one-line rationale per item
 - Read-only: no Edit/Write tools — keeps its hands off the artifact
@@ -80,14 +84,15 @@ Each role is a fresh subagent dispatch via the `Agent` tool with `subagent_type:
 
 ### Decider
 
-- Receives the artifact AND the Checker's full recommendation list
+- Receives the artifact AND the Checker's full recommendation list (and in round 2+, prior round decisions)
 - For each recommendation, decides:
-  - **accept** → goes on the fix list unchanged
-  - **modify** → the adjusted version goes on the fix list (Decider writes the modified instruction)
-  - **reject** → does NOT go on the fix list (with one-line reason for the audit trail)
+  - **accept** → goes on the fix list unchanged, preserving the Checker's diagnostic rationale
+  - **modify** → the adjusted version goes on the fix list (Decider writes the modified instruction and rationale)
+  - **reject** → does NOT go on the fix list (recorded with a clear one-line reason so the orchestrator can pass it to round 2+ agents as out-of-scope guardrails)
 - May **add fixes** the Checker missed — these go on the fix list too
 - **At a checkpoint:** outputs the fix list (Maker applies it at the start of the next batch), or exactly `CONTINUE` if it's empty. Never `DONE` at a checkpoint
-- **At completion:** outputs the fix list, or exactly `DONE` if it's empty. If every surviving item is nice-to-have, output `DONE` plus an "optional polish" list for the user — don't send the Maker back for aesthetics
+- **At completion (Round 1):** outputs the fix list with attached rationales, plus the list of rejected items, or exactly `DONE` if empty. If every surviving item is nice-to-have, output `DONE` plus an "optional polish" list for the user — don't send the Maker back for aesthetics
+- **At completion (Round 2+):** applies strict convergence thresholding. Only send the Maker back for genuine blockers or correctness regressions. Minor or cosmetic suggestions must be routed to the user's "optional polish" list alongside `DONE` to prevent endless review churn
 - Read-only tools; owns the stop decision
 
 ## Parallel Makers
@@ -109,15 +114,28 @@ for each batch except the last:
     recs  = Checker(work, scope = phases built so far)    # checkpoint: single pass
     fixes = Decider(work, recs)                           # fix list or CONTINUE
 work += Makers build final batch          # apply pending fixes first
-for round in 1..5:                        # completion loop
-    recs = Checker(work, scope = whole)
-    decision = Decider(work, recs)
-    if decision == DONE: return work
-    work = Maker applies decision's fix list
+
+# Completion Loop (rapid convergence in 1–2 rounds)
+prior_decisions = null
+for round in 1..5:
+    if round == 1:
+        recs = Checker(work, scope = "full completion")
+    else:
+        recs = Checker(work, scope = "verification & regressions", prior = prior_decisions)
+    
+    decision = Decider(work, recs, prior = prior_decisions, round = round)
+    if decision.status == DONE: return work
+    
+    prior_decisions = decision
+    work = Maker(
+        work,
+        fixes = decision.fixes_with_rationales,
+        rejected_boundaries = decision.rejected_items
+    )
 surface_to_user(work, "iteration cap reached; remaining concerns: ...")
 ```
 
-**Convergence expectation:** with top-tier models in every role, the completion loop usually reaches `DONE` in 1–2 rounds. Three or more rounds of churn is a signal the work needs human input or a different decomposition — surface it rather than grinding to the cap.
+**Convergence expectation:** with targeted round 2+ context (rationales + reject boundaries + verification-mode checking), the completion loop typically reaches `DONE` in 1–2 rounds. Three or more rounds of churn is a signal the work needs human input or a different decomposition — surface it rather than grinding to the cap.
 
 **Iteration cap:** stop the completion loop at 5 rounds even if the Decider hasn't signaled `DONE`. If you hit the cap, surface remaining issues to the user — don't quietly ship.
 
@@ -133,17 +151,15 @@ surface_to_user(work, "iteration cap reached; remaining concerns: ...")
 
 The orchestrating session drives the loop with real `Agent` tool calls. State (the current artifact, the Checker's recommendations, the Decider's fix list, which phases are built) lives in the orchestrator and is pasted verbatim into each subagent's prompt — subagents have no shared memory.
 
-**Model: all three roles MUST run on the strongest available reasoning model.** Prefer `fable` if it appears in the `Agent` tool's `model` enum (Fable/Mythos-class); otherwise use `opus`. Never run a make-check role on `sonnet` or `haiku` — the adversarial review and arbitration quality depends on top-tier reasoning, and weaker models cause the Checker to miss issues and the Decider to rubber-stamp. If you cannot pass `model: "fable"` (or `"opus"`) to the `Agent` tool in the current environment, surface that to the user before proceeding — do not silently fall back.
+**Model selection:** All three roles should run on capable reasoning models configured in your environment to ensure thorough review and unbiased arbitration.
 
 **Maker dispatch (per batch):**
 
 ```
 Agent({
   subagent_type: "general-purpose",
-  model: "fable",   // or "opus" if fable is not in the model enum
   description: "Make-check Maker — batch 1 (phases 1–2 of 10)",
-  prompt: `You are the MAKER in a make-check pod. Do not self-critique
-  or anticipate a reviewer.
+  prompt: `You are the MAKER in a make-check pod.
 
   Build phases <a>–<b> of the task below. Work phase by phase, keeping
   each phase compiling and tested. If a pending fix list is included,
@@ -161,12 +177,38 @@ Agent({
 
 For **parallel Makers**, dispatch several of these in ONE message, one per independent phase group; add `isolation: "worktree"` when file ownership overlaps, and merge before any review.
 
+**Maker dispatch (completion loop — remediation round N):**
+
+```
+Agent({
+  subagent_type: "general-purpose",
+  description: "Make-check Maker — completion round N remediation",
+  prompt: `You are the MAKER in a make-check pod applying completion fixes.
+
+  Review and implement the Decider's fix list below. Each item includes
+  the Checker's diagnostic rationale to help you address the root cause
+  directly. Respect the OUT-OF-SCOPE / REJECTED boundaries — do NOT alter
+  or refactor areas that the Decider explicitly designated to leave as-is.
+
+  Ensure all changes compile, pass tests, and don't introduce regressions.
+
+  TASK / ARTIFACT: <original task or path to current artifact>
+  ACCEPTED FIXES & RATIONALE:
+  <paste Decider fix list with diagnostic notes>
+
+  OUT-OF-SCOPE / REJECTED (DO NOT TOUCH):
+  <paste Decider reject list with reasons, or "none">
+
+  Return the concrete artifact or summary of changed files with diffs
+  and verbatim test/build output.`
+})
+```
+
 **Checker dispatch (checkpoint or completion):**
 
 ```
 Agent({
   subagent_type: "general-purpose",
-  model: "fable",   // or "opus"
   description: "Make-check Checker — checkpoint 1 | completion round N",
   prompt: `You are the CHECKER in a make-check pod. Adversarial but
   collaborative review. Read-only — do not edit anything.
@@ -176,9 +218,18 @@ Agent({
     Review what exists as a coherent partial whole — direction,
     architecture, conventions, integration. Unbuilt phases are NOT
     findings.
-    COMPLETION: the work is finished. Review it as a whole, including
-    how parts built at different times or by parallel Makers fit
-    together.
+
+    COMPLETION (Round 1): the work is finished. Review it as a whole,
+    including how parts built at different times or by parallel Makers
+    fit together.
+
+    COMPLETION (Round 2+ — VERIFICATION & REGRESSION):
+    Focus strictly on:
+    1. Verifying whether the previous round's accepted fixes were applied
+       properly and resolved the root problem.
+    2. Detecting regressions or unintended side-effects from the fixes.
+    Do NOT re-raise items listed under PRIOR REJECTED DECISIONS unless
+    new evidence or broken invariants have surfaced.
 
   Hunt for logic errors, edge cases, security gaps, missing tests,
   performance pitfalls, fragile assumptions, convention drift, and
@@ -189,7 +240,9 @@ Agent({
   Do NOT prioritize across items. If nothing is wrong, output exactly:
   "no issues found".
 
-  ARTIFACT: <paste artifact or file path>`
+  ARTIFACT: <paste artifact or file path>
+  PRIOR ACCEPTED FIXES (Round 2+ only): <paste prior round fixes, or "N/A">
+  PRIOR REJECTED DECISIONS (Round 2+ only): <paste prior round rejects, or "N/A">`
 })
 ```
 
@@ -198,22 +251,34 @@ Agent({
 ```
 Agent({
   subagent_type: "general-purpose",
-  model: "fable",   // or "opus"
   description: "Make-check Decider — checkpoint 1 | completion round N",
   prompt: `You are the DECIDER in a make-check pod. For each
-  recommendation: accept (goes on fix list unchanged), modify (write
-  the adjusted instruction), or reject (one-line reason; stays off the
-  fix list). You may add fixes the Checker missed.
+  recommendation: accept (goes on fix list, preserving Checker's rationale),
+  modify (write adjusted instruction and reason), or reject (one-line reason;
+  stays off the fix list). You may add fixes the Checker missed.
 
-  This is a <CHECKPOINT | COMPLETION> review.
+  This is a <CHECKPOINT | COMPLETION ROUND 1 | COMPLETION ROUND 2+> review.
   - CHECKPOINT: output the ordered fix list (applied at the start of
     the Maker's next batch), or exactly CONTINUE if it is empty.
-  - COMPLETION: output the ordered fix list, or exactly DONE if it is
-    empty. If every surviving item is nice-to-have, output DONE plus an
-    "optional polish" list instead of another fix round.
+  - COMPLETION ROUND 1: output the ordered fix list (with Checker rationales)
+    plus the list of rejected items, or exactly DONE if empty. If every
+    surviving item is nice-to-have, output DONE plus an "optional polish" list.
+  - COMPLETION ROUND 2+: apply strict convergence thresholding. Only output
+    a fix list for genuine blockers or correctness regressions. Route
+    all nice-to-have/polish items to the "optional polish" list and output DONE.
+
+  OUTPUT FORMAT:
+  STATUS: <DONE | CONTINUE | FIXES_REQUIRED>
+  ACCEPTED FIXES (with rationale):
+  - [item 1] ...
+  REJECTED ITEMS (with reason):
+  - [item 1] ...
+  OPTIONAL POLISH (for user, non-blocking):
+  - [item 1] ...
 
   ARTIFACT: <paste artifact>
-  RECOMMENDATIONS: <paste Checker output>`
+  RECOMMENDATIONS: <paste Checker output>
+  PRIOR ROUND DECISIONS (Round 2+ only): <paste prior decisions, or "N/A">`
 })
 ```
 
@@ -242,19 +307,22 @@ Agent({
 | Reviewing one parallel Maker's slice in isolation | Misses exactly the parallel-seam bugs unified review exists to catch |
 | Sharing chat context across roles | Defeats independence; Checker absorbs Maker's framing |
 | Using make-check on trivial work | Burns tokens and time for no quality gain |
-| Skipping the Checker because "the Maker is a strong model" | Strong models still make systemic and integration errors; independent review is the pattern's whole value |
-| Running any role on `sonnet` / `haiku` to save tokens | Weak reasoning kills review quality; use `fable` (or `opus`), or surface the constraint to the user |
+| Sending round 2+ Maker a raw fix list without diagnostic rationale or rejected boundaries | Maker applies superficial fixes or re-touches rejected areas, delaying convergence |
+| Checker in round 2+ re-flagging items already rejected by the Decider | Causes circular review loops; supply prior decisions so Checker focuses on verification and regressions |
+| Decider looping on nice-to-haves in round 2+ | Churns on polish; route nice-to-haves to optional user notes and mark DONE |
+| Skipping the Checker because the Maker seems confident | Any model can make systemic and integration errors; independent review is the pattern's whole value |
+| Downgrading Checker or Decider to an underpowered model | Weak reasoning undermines review and arbitration quality; maintain consistent model capability across all roles |
 
 ## Quick Reference
 
 | | Maker | Checker | Decider |
 |---|---|---|---|
-| Reads | Task + assigned phases + pending fix list | Artifact + scope (checkpoint or completion) | Artifact + recommendations + scope |
-| Produces | Batch artifact with verbatim test output | Numbered recommendations | Fix list, `CONTINUE` (checkpoint), or `DONE` (completion) |
-| Constraints | No self-review; may run in parallel | No edits; respect scope | Must justify rejects |
+| Reads | Task + assigned phases + pending fix/remediation list (with rationales & reject boundaries) | Artifact + scope (checkpoint, round 1, or round 2+ verification with prior decisions) | Artifact + recommendations + scope + round context |
+| Produces | Batch / remediation artifact with verbatim test output | Numbered recommendations | Fix list, `CONTINUE` (checkpoint), or `DONE` (completion) |
+| Constraints | Self-check & testing encouraged; may run in parallel | No edits; respect scope (verification mode in round 2+) | Must justify rejects; enforce strict thresholding in round 2+ |
 | Context | Fresh subagent | Fresh subagent | Fresh subagent |
 | Termination authority | None | None | Owns `CONTINUE` / `DONE` |
 
 ## Real-World Fit
 
-Make-check trades latency and tokens for quality. Use it when the cost of a missed issue (production bug, lost data, security incident, bad architectural commitment) outweighs the cost of a few extra subagent rounds. With strong models the overhead is modest — typically one checkpoint, one or two completion rounds — but for everything trivial, single-agent execution is still faster and usually fine.
+Make-check trades latency and tokens for quality. Use it when the cost of a missed issue (production bug, lost data, security incident, bad architectural commitment) outweighs the cost of a few extra subagent rounds. The overhead is modest — typically one checkpoint, one or two completion rounds — but for everything trivial, single-agent execution is still faster and usually fine.
